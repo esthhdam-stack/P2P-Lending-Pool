@@ -22,9 +22,10 @@
 (define-data-var pool-total-assets uint u0)
 (define-data-var total-borrowed-assets uint u0)
 (define-data-var interest-rate-per-block uint u5)
+(define-data-var penalty-rate-per-block uint u15)
+(define-data-var grace-period-blocks uint u1440)
 (define-data-var liquidation-threshold uint u80)
 (define-data-var collateral-ratio uint u150)
-(define-data-var total-shares uint u0)
 (define-data-var contract-owner principal tx-sender)
 (define-data-var pending-owner (optional principal) none)
 
@@ -39,18 +40,18 @@
         collateral: uint,
         start-height: uint,
         last-interaction: uint,
+        due-block: uint,
+        rate-at-borrow: uint,
     }
 )
 
 (define-private (calculate-interest
-        (amount uint)
-        (blocks-elapsed uint)
-    )
-    (let (
-            (rate (var-get interest-rate-per-block))
-            (interest-accumulated (/ (* amount (* rate blocks-elapsed)) u10000))
-        )
-        interest-accumulated
+        (principal uint)
+        (start-h uint)
+        (due-h uint)
+        (normal-rate uint)
+        (penalty-rate uint)
+        (current-h uint)
     )
 )
 
@@ -95,32 +96,45 @@
     (ok (var-get total-borrowed-assets))
 )
 
-(define-read-only (get-total-shares)
-    (ok (var-get total-shares))
-)
-
-(define-read-only (get-lender-shares (lender principal))
-    (ok (default-to u0 (map-get? lenders lender)))
-)
-
-(define-read-only (get-lender-value (lender principal))
-    (ok (shares-to-assets (default-to u0 (map-get? lenders lender))))
-)
-
-(define-read-only (get-exchange-rate)
-    (let (
-            (current-total-shares (var-get total-shares))
-            (current-pool (var-get pool-total-assets))
-        )
-        (if (is-eq current-total-shares u0)
-            (ok u10000)
-            (ok (/ (* current-pool u10000) current-total-shares))
-        )
-    )
+(define-read-only (get-lender-balance (lender principal))
+    (default-to u0 (map-get? lenders lender))
 )
 
 (define-read-only (get-loan-data (borrower principal))
     (map-get? loans borrower)
+)
+
+(define-read-only (get-grace-period-blocks)
+    (ok (var-get grace-period-blocks))
+)
+
+(define-read-only (get-penalty-rate-per-block)
+    (ok (var-get penalty-rate-per-block))
+)
+
+(define-read-only (get-overdue-status (borrower principal))
+    (let (
+            (loan (unwrap! (map-get? loans borrower) (err u0)))
+            (due-h (get due-block loan))
+        )
+        (if (> burn-block-height due-h)
+            (ok { overdue: true, blocks-past-due: (- burn-block-height due-h) })
+            (ok { overdue: false, blocks-past-due: u0 })
+        )
+    )
+)
+
+(define-read-only (get-current-interest-accrued (borrower principal))
+    (let (
+            (loan (unwrap! (map-get? loans borrower) (err u0)))
+            (amt (get amount loan))
+            (start (get start-height loan))
+            (due-h (get due-block loan))
+            (normal-rate (get rate-at-borrow loan))
+            (penalty-rate (var-get penalty-rate-per-block))
+        )
+        (ok (calculate-interest amt start due-h normal-rate penalty-rate burn-block-height))
+    )
 )
 
 (define-read-only (get-treasury-balance)
@@ -145,36 +159,44 @@
 
 (define-public (lend (amount uint))
     (let (
-            (minted (shares-to-mint-for amount))
-            (current-lender-shares (default-to u0 (map-get? lenders tx-sender)))
+            (loan (unwrap! (map-get? loans borrower) (err u0)))
+            (collateral-val (get collateral loan))
+            (amt (get amount loan))
+            (start (get start-height loan))
+            (due-h (get due-block loan))
+            (normal-rate (get rate-at-borrow loan))
+            (penalty-rate (var-get penalty-rate-per-block))
+            (interest (calculate-interest amt start due-h normal-rate penalty-rate burn-block-height))
+            (total-debt (+ amt interest))
         )
-        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
-        (asserts! (> minted u0) ERR-ZERO-SHARES)
-        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-        (map-set lenders tx-sender (+ current-lender-shares minted))
-        (var-set pool-total-assets (+ (var-get pool-total-assets) amount))
-        (var-set total-shares (+ (var-get total-shares) minted))
-        (ok minted)
+        (if (is-eq total-debt u0)
+            (ok u999999)
+            (ok (/ (* collateral-val u100) total-debt))
+        )
     )
 )
 
-(define-public (withdraw-funds (shares uint))
+(define-public (lend (amount uint))
+    (let ((current-balance (default-to u0 (map-get? lenders tx-sender))))
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set lenders tx-sender (+ current-balance amount))
+        (var-set pool-total-assets (+ (var-get pool-total-assets) amount))
+        (ok amount)
+    )
+)
+
+(define-public (withdraw-funds (amount uint))
     (let (
-            (current-lender-shares (default-to u0 (map-get? lenders tx-sender)))
-            (current-total-shares (var-get total-shares))
-            (current-pool (var-get pool-total-assets))
-            (redeemable (shares-to-assets shares))
-            (pool-available (- current-pool (var-get total-borrowed-assets)))
+            (current-balance (default-to u0 (map-get? lenders tx-sender)))
+            (pool-available (- (var-get pool-total-assets) (var-get total-borrowed-assets)))
         )
-        (asserts! (> shares u0) ERR-INVALID-AMOUNT)
-        (asserts! (> current-total-shares u0) ERR-POOL-EMPTY)
-        (asserts! (>= current-lender-shares shares) ERR-INSUFFICIENT-FUNDS)
-        (asserts! (>= pool-available redeemable) ERR-POOL-EMPTY)
-        (try! (as-contract (stx-transfer? redeemable tx-sender tx-sender)))
-        (map-set lenders tx-sender (- current-lender-shares shares))
-        (var-set pool-total-assets (- current-pool redeemable))
-        (var-set total-shares (- current-total-shares shares))
-        (ok redeemable)
+        (asserts! (>= current-balance amount) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (>= pool-available amount) ERR-POOL-EMPTY)
+        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+        (map-set lenders tx-sender (- current-balance amount))
+        (var-set pool-total-assets (- (var-get pool-total-assets) amount))
+        (ok amount)
     )
 )
 
@@ -186,12 +208,12 @@
             (pool-available (- (var-get pool-total-assets) (var-get total-borrowed-assets)))
             (existing-loan (map-get? loans tx-sender))
             (required-collateral (/ (* amount (var-get collateral-ratio)) u100))
+            (current-rate (var-get interest-rate-per-block))
+            (due-h (+ burn-block-height (var-get grace-period-blocks)))
         )
         (asserts! (is-none existing-loan) ERR-LOAN-ACTIVE)
         (asserts! (>= pool-available amount) ERR-POOL-EMPTY)
-        (asserts! (>= collateral-amount required-collateral)
-            ERR-INSUFFICIENT-FUNDS
-        )
+        (asserts! (>= collateral-amount required-collateral) ERR-INSUFFICIENT-FUNDS)
         (try! (stx-transfer? collateral-amount tx-sender (as-contract tx-sender)))
         (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
         (map-set loans tx-sender {
@@ -199,6 +221,8 @@
             collateral: collateral-amount,
             start-height: burn-block-height,
             last-interaction: burn-block-height,
+            due-block: due-h,
+            rate-at-borrow: current-rate,
         })
         (var-set total-borrowed-assets (+ (var-get total-borrowed-assets) amount))
         (ok amount)
@@ -321,7 +345,10 @@
             (current-collateral (get collateral loan))
             (principal-amt (get amount loan))
             (start-h (get start-height loan))
-            (interest (calculate-interest principal-amt (- burn-block-height start-h)))
+            (due-h (get due-block loan))
+            (normal-rate (get rate-at-borrow loan))
+            (penalty-rate (var-get penalty-rate-per-block))
+            (interest (calculate-interest principal-amt start-h due-h normal-rate penalty-rate burn-block-height))
             (total-debt (+ principal-amt interest))
             (required-collateral (/ (* total-debt (var-get collateral-ratio)) u100))
             (new-collateral (- current-collateral amount))
@@ -367,19 +394,21 @@
     )
 )
 
-(define-public (set-collateral-ratio (new-ratio uint))
+(define-public (set-penalty-rate (new-rate uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
-        (var-set collateral-ratio new-ratio)
-        (ok new-ratio)
+        (asserts! (>= new-rate (var-get interest-rate-per-block)) ERR-INVALID-AMOUNT)
+        (var-set penalty-rate-per-block new-rate)
+        (ok new-rate)
     )
 )
 
-(define-public (set-liquidation-threshold (new-threshold uint))
+(define-public (set-grace-period (new-blocks uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
-        (var-set liquidation-threshold new-threshold)
-        (ok new-threshold)
+        (asserts! (> new-blocks u0) ERR-INVALID-AMOUNT)
+        (var-set grace-period-blocks new-blocks)
+        (ok new-blocks)
     )
 )
 
@@ -429,19 +458,11 @@
     )
 )
 
-(define-read-only (get-health-factor (borrower principal))
-    (let (
-            (loan (unwrap! (map-get? loans borrower) (err u0)))
-            (collateral-val (get collateral loan))
-            (amt (get amount loan))
-            (start (get start-height loan))
-            (interest (calculate-interest amt (- burn-block-height start)))
-            (total-debt (+ amt interest))
-        )
-        (if (is-eq total-debt u0)
-            (ok u999999)
-            (ok (/ (* collateral-val u100) total-debt))
-        )
+(define-public (set-liquidation-threshold (new-threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set liquidation-threshold new-threshold)
+        (ok new-threshold)
     )
 )
 
