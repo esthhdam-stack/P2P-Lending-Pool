@@ -1,0 +1,37 @@
+clarinet : error: 
+unexpected argument 
+'--output-format' 
+found
+At line:1 char:1
++ clarinet check 
+--output-format 
+json 2>&1 | 
+Out-File -FilePath 
+clarine ...
++ ~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
+~~
+    + CategoryInfo  
+            : NotS  
+  pecified: (erro   
+ r: unexpect...t    
+-format' found:    
+String) [], Rem    
+oteException
+    + FullyQualifie 
+   dErrorId : Nati  
+  veCommandError
+ 
+
+  tip: to pass 
+'--output-format' 
+as a value, use '-- 
+--output-format'
+
+Usage: clarinet 
+check [OPTIONS] 
+[FILE]
+
+For more 
+information, try 
+'--help'.

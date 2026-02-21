@@ -1,4 +1,4 @@
-(define-trait flash-loan-receiver (
+(define-trait flash-loan-receiver (  
     (execute-operation
         (uint uint)
         (response bool uint)
@@ -13,13 +13,17 @@
 (define-constant ERR-INVALID-AMOUNT (err u1005))
 (define-constant ERR-HEALTHY-LOAN (err u1006))
 (define-constant ERR-INVALID-FLASH-LOAN (err u1007))
-(define-constant FLASH-LOAN-FEE-BPS u5) ;; 5 basis points (0.05%)
+(define-constant ERR-COLLATERAL-TOO-LOW (err u1008))
+(define-constant ERR-ZERO-SHARES (err u1009))
+(define-constant FLASH-LOAN-FEE-BPS u5)
 
 (define-data-var pool-total-assets uint u0)
 (define-data-var total-borrowed-assets uint u0)
-(define-data-var interest-rate-per-block uint u5) ;; 0.05% basis points representation or similar simple scale
-(define-data-var liquidation-threshold uint u80) ;; 80% LTV
-(define-data-var collateral-ratio uint u150) ;; 150% collateral required
+(define-data-var interest-rate-per-block uint u5)
+(define-data-var liquidation-threshold uint u80)
+(define-data-var collateral-ratio uint u150)
+(define-data-var total-shares uint u0)
+(define-data-var contract-owner principal tx-sender)
 
 (define-map lenders
     principal
@@ -47,6 +51,30 @@
     )
 )
 
+(define-private (shares-to-mint-for (amount uint))
+    (let (
+            (current-pool (var-get pool-total-assets))
+            (current-total-shares (var-get total-shares))
+        )
+        (if (is-eq current-total-shares u0)
+            amount
+            (/ (* amount current-total-shares) current-pool)
+        )
+    )
+)
+
+(define-private (shares-to-assets (shares uint))
+    (let (
+            (current-total-shares (var-get total-shares))
+            (current-pool (var-get pool-total-assets))
+        )
+        (if (is-eq current-total-shares u0)
+            u0
+            (/ (* shares current-pool) current-total-shares)
+        )
+    )
+)
+
 (define-read-only (get-pool-balance)
     (ok (var-get pool-total-assets))
 )
@@ -55,8 +83,28 @@
     (ok (var-get total-borrowed-assets))
 )
 
-(define-read-only (get-lender-balance (lender principal))
-    (default-to u0 (map-get? lenders lender))
+(define-read-only (get-total-shares)
+    (ok (var-get total-shares))
+)
+
+(define-read-only (get-lender-shares (lender principal))
+    (ok (default-to u0 (map-get? lenders lender)))
+)
+
+(define-read-only (get-lender-value (lender principal))
+    (ok (shares-to-assets (default-to u0 (map-get? lenders lender))))
+)
+
+(define-read-only (get-exchange-rate)
+    (let (
+            (current-total-shares (var-get total-shares))
+            (current-pool (var-get pool-total-assets))
+        )
+        (if (is-eq current-total-shares u0)
+            (ok u10000)
+            (ok (/ (* current-pool u10000) current-total-shares))
+        )
+    )
 )
 
 (define-read-only (get-loan-data (borrower principal))
@@ -64,26 +112,37 @@
 )
 
 (define-public (lend (amount uint))
-    (let ((current-balance (default-to u0 (map-get? lenders tx-sender))))
+    (let (
+            (minted (shares-to-mint-for amount))
+            (current-lender-shares (default-to u0 (map-get? lenders tx-sender)))
+        )
         (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (> minted u0) ERR-ZERO-SHARES)
         (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-        (map-set lenders tx-sender (+ current-balance amount))
+        (map-set lenders tx-sender (+ current-lender-shares minted))
         (var-set pool-total-assets (+ (var-get pool-total-assets) amount))
-        (ok amount)
+        (var-set total-shares (+ (var-get total-shares) minted))
+        (ok minted)
     )
 )
 
-(define-public (withdraw-funds (amount uint))
+(define-public (withdraw-funds (shares uint))
     (let (
-            (current-balance (default-to u0 (map-get? lenders tx-sender)))
-            (pool-available (- (var-get pool-total-assets) (var-get total-borrowed-assets)))
+            (current-lender-shares (default-to u0 (map-get? lenders tx-sender)))
+            (current-total-shares (var-get total-shares))
+            (current-pool (var-get pool-total-assets))
+            (redeemable (shares-to-assets shares))
+            (pool-available (- current-pool (var-get total-borrowed-assets)))
         )
-        (asserts! (>= current-balance amount) ERR-INSUFFICIENT-FUNDS)
-        (asserts! (>= pool-available amount) ERR-POOL-EMPTY)
-        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
-        (map-set lenders tx-sender (- current-balance amount))
-        (var-set pool-total-assets (- (var-get pool-total-assets) amount))
-        (ok amount)
+        (asserts! (> shares u0) ERR-INVALID-AMOUNT)
+        (asserts! (> current-total-shares u0) ERR-POOL-EMPTY)
+        (asserts! (>= current-lender-shares shares) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (>= pool-available redeemable) ERR-POOL-EMPTY)
+        (try! (as-contract (stx-transfer? redeemable tx-sender tx-sender)))
+        (map-set lenders tx-sender (- current-lender-shares shares))
+        (var-set pool-total-assets (- current-pool redeemable))
+        (var-set total-shares (- current-total-shares shares))
+        (ok redeemable)
     )
 )
 
@@ -101,19 +160,8 @@
         (asserts! (>= collateral-amount required-collateral)
             ERR-INSUFFICIENT-FUNDS
         )
-
-        ;; Transfer collateral to contract
         (try! (stx-transfer? collateral-amount tx-sender (as-contract tx-sender)))
-
-        ;; Transfer borrowed amount to borrower from pool (conceptually, though they are same asset here so it's a bit circular but shows logic)
-        ;; To make this meaningful in a single-asset demo, we assume the 'collateral' is locked separatedly from the pool or just track it.
-        ;; For this MVP self-contained logic: we just lock the collateral effectively by keeping it in the contract under 'loans' map.
-        ;; And then we send them the borrowed amount.
-        ;; WAIT: If I lend 100 STX collateral to borrow 50 STX, I just sent 100 STX to contract. Then contract sends me 50 STX. Net -50 STX.
-        ;; This works for a "Lending Pool" logic demo.
-
         (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
-
         (map-set loans tx-sender {
             amount: amount,
             collateral: collateral-amount,
@@ -135,18 +183,12 @@
             (total-due (+ principal-amt interest))
         )
         (asserts! (>= repay-amount total-due) ERR-INSUFFICIENT-FUNDS)
-
-        ;; Borrower sends Repayment Amount
         (try! (stx-transfer? total-due tx-sender (as-contract tx-sender)))
-
-        ;; Contract returns Collateral
         (try! (as-contract (stx-transfer? collateral-amt tx-sender tx-sender)))
-
         (var-set total-borrowed-assets
             (- (var-get total-borrowed-assets) principal-amt)
         )
         (var-set pool-total-assets (+ (var-get pool-total-assets) interest))
-
         (map-delete loans tx-sender)
         (ok total-due)
     )
@@ -160,25 +202,16 @@
             (start-h (get start-height loan))
             (interest (calculate-interest principal-amt (- burn-block-height start-h)))
             (total-due (+ principal-amt interest))
-            ;; If collateral value < total due * margin, can liquidate
-            ;; Simplified: if total-due > collateral * 0.9 (threshold)
             (threshold-factor (var-get liquidation-threshold))
             (health-benchmark (/ (* collateral-amt threshold-factor) u100))
         )
-        ;; If debt is too high compared to collateral
         (asserts! (> total-due health-benchmark) ERR-HEALTHY-LOAN)
-
-        ;; Liquidator pays the debt (principal + interest)
         (try! (stx-transfer? total-due tx-sender (as-contract tx-sender)))
-
-        ;; Liquidator gets the collateral
         (try! (as-contract (stx-transfer? collateral-amt tx-sender tx-sender)))
-
         (var-set total-borrowed-assets
             (- (var-get total-borrowed-assets) principal-amt)
         )
         (var-set pool-total-assets (+ (var-get pool-total-assets) interest))
-
         (map-delete loans borrower)
         (ok collateral-amt)
     )
@@ -192,7 +225,6 @@
     )
 )
 
-;; Flash Loan
 (define-public (flash-loan
         (amount uint)
         (recipient <flash-loan-receiver>)
@@ -204,28 +236,47 @@
         )
         (asserts! (> amount u0) ERR-INVALID-AMOUNT)
         (asserts! (<= amount pre-bal) ERR-INSUFFICIENT-FUNDS)
-
-        ;; Transfer loan to recipient
         (try! (as-contract (stx-transfer? amount tx-sender (contract-of recipient))))
-
-        ;; Execute operation on recipient
         (try! (contract-call? recipient execute-operation amount fee))
-
-        ;; Verify repayment
         (asserts! (>= (stx-get-balance (as-contract tx-sender)) (+ pre-bal fee))
             ERR-INVALID-FLASH-LOAN
         )
-
-        ;; Update pool assets with the fee earned
         (var-set pool-total-assets (+ (var-get pool-total-assets) fee))
-
         (ok amount)
     )
 )
 
-;; Admin functions for parameters
+(define-public (deposit-collateral (amount uint))
+    (let (
+            (loan (unwrap! (map-get? loans tx-sender) ERR-LOAN-NOT-FOUND))
+            (current-collateral (get collateral loan))
+        )
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set loans tx-sender
+            (merge loan { collateral: (+ current-collateral amount) })
+        )
+        (ok amount)
+    )
+)
 
-(define-data-var contract-owner principal tx-sender)
+(define-public (withdraw-collateral (amount uint))
+    (let (
+            (loan (unwrap! (map-get? loans tx-sender) ERR-LOAN-NOT-FOUND))
+            (current-collateral (get collateral loan))
+            (principal-amt (get amount loan))
+            (start-h (get start-height loan))
+            (interest (calculate-interest principal-amt (- burn-block-height start-h)))
+            (total-debt (+ principal-amt interest))
+            (required-collateral (/ (* total-debt (var-get collateral-ratio)) u100))
+            (new-collateral (- current-collateral amount))
+        )
+        (asserts! (>= current-collateral amount) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (>= new-collateral required-collateral) ERR-COLLATERAL-TOO-LOW)
+        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+        (map-set loans tx-sender (merge loan { collateral: new-collateral }))
+        (ok amount)
+    )
+)
 
 (define-public (set-interest-rate (new-rate uint))
     (begin
@@ -271,13 +322,12 @@
             (total-debt (+ amt interest))
         )
         (if (is-eq total-debt u0)
-            (ok u999999) ;; infinite health
+            (ok u999999)
             (ok (/ (* collateral-val u100) total-debt))
         )
     )
 )
 
-;; Initialization check
 (begin
     (print "P2P Lending Pool Contract Initialized")
 )
