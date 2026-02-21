@@ -16,7 +16,6 @@
 (define-constant ERR-COLLATERAL-TOO-LOW (err u1008))
 (define-constant ERR-ZERO-SHARES (err u1009))
 (define-constant ERR-NO-PENDING-OWNER (err u1010))
-(define-constant ERR-NO-TREASURY-BALANCE (err u1011))
 (define-constant FLASH-LOAN-FEE-BPS u5)
 (define-constant MAX-PROTOCOL-FEE-BPS u2000)
 
@@ -28,9 +27,6 @@
 (define-data-var total-shares uint u0)
 (define-data-var contract-owner principal tx-sender)
 (define-data-var pending-owner (optional principal) none)
-(define-data-var protocol-fee-bps uint u1000)
-(define-data-var treasury-principal principal tx-sender)
-(define-data-var treasury-balance uint u0)
 
 (define-map lenders
     principal
@@ -335,6 +331,31 @@
         (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
         (map-set loans tx-sender (merge loan { collateral: new-collateral }))
         (ok amount)
+    )
+)
+
+(define-read-only (get-contract-owner)
+    (ok (var-get contract-owner))
+)
+
+(define-read-only (get-pending-owner)
+    (ok (var-get pending-owner))
+)
+
+(define-public (propose-owner (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set pending-owner (some new-owner))
+        (ok new-owner)
+    )
+)
+
+(define-public (accept-ownership)
+    (let ((nominee (unwrap! (var-get pending-owner) ERR-NO-PENDING-OWNER)))
+        (asserts! (is-eq tx-sender nominee) ERR-NOT-AUTHORIZED)
+        (var-set contract-owner nominee)
+        (var-set pending-owner none)
+        (ok nominee)
     )
 )
 
