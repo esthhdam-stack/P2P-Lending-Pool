@@ -13,6 +13,7 @@
 (define-constant ERR-INVALID-AMOUNT (err u1005))
 (define-constant ERR-HEALTHY-LOAN (err u1006))
 (define-constant ERR-INVALID-FLASH-LOAN (err u1007))
+(define-constant ERR-COLLATERAL-TOO-LOW (err u1008))
 (define-constant FLASH-LOAN-FEE-BPS u5) ;; 5 basis points (0.05%)
 
 (define-data-var pool-total-assets uint u0)
@@ -219,6 +220,39 @@
         ;; Update pool assets with the fee earned
         (var-set pool-total-assets (+ (var-get pool-total-assets) fee))
 
+        (ok amount)
+    )
+)
+
+(define-public (deposit-collateral (amount uint))
+    (let (
+            (loan (unwrap! (map-get? loans tx-sender) ERR-LOAN-NOT-FOUND))
+            (current-collateral (get collateral loan))
+        )
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (map-set loans tx-sender
+            (merge loan { collateral: (+ current-collateral amount) })
+        )
+        (ok amount)
+    )
+)
+
+(define-public (withdraw-collateral (amount uint))
+    (let (
+            (loan (unwrap! (map-get? loans tx-sender) ERR-LOAN-NOT-FOUND))
+            (current-collateral (get collateral loan))
+            (principal-amt (get amount loan))
+            (start-h (get start-height loan))
+            (interest (calculate-interest principal-amt (- burn-block-height start-h)))
+            (total-debt (+ principal-amt interest))
+            (required-collateral (/ (* total-debt (var-get collateral-ratio)) u100))
+            (new-collateral (- current-collateral amount))
+        )
+        (asserts! (>= current-collateral amount) ERR-INSUFFICIENT-FUNDS)
+        (asserts! (>= new-collateral required-collateral) ERR-COLLATERAL-TOO-LOW)
+
+        (try! (as-contract (stx-transfer? amount tx-sender tx-sender)))
+        (map-set loans tx-sender (merge loan { collateral: new-collateral }))
         (ok amount)
     )
 )
