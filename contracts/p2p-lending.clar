@@ -14,7 +14,10 @@
 (define-constant ERR-HEALTHY-LOAN (err u1006))
 (define-constant ERR-INVALID-FLASH-LOAN (err u1007))
 (define-constant ERR-COLLATERAL-TOO-LOW (err u1008))
+(define-constant ERR-ZERO-SHARES (err u1009))
+(define-constant ERR-NO-PENDING-OWNER (err u1010))
 (define-constant FLASH-LOAN-FEE-BPS u5)
+(define-constant MAX-PROTOCOL-FEE-BPS u2000)
 
 (define-data-var pool-total-assets uint u0)
 (define-data-var total-borrowed-assets uint u0)
@@ -24,6 +27,7 @@
 (define-data-var liquidation-threshold uint u80)
 (define-data-var collateral-ratio uint u150)
 (define-data-var contract-owner principal tx-sender)
+(define-data-var pending-owner (optional principal) none)
 
 (define-map lenders
     principal
@@ -49,15 +53,37 @@
         (penalty-rate uint)
         (current-h uint)
     )
-    (if (<= current-h due-h)
-        (/ (* principal (* normal-rate (- current-h start-h))) u10000)
-        (let (
-                (normal-blocks (- due-h start-h))
-                (penalty-blocks (- current-h due-h))
-                (normal-interest (/ (* principal (* normal-rate normal-blocks)) u10000))
-                (penalty-interest (/ (* principal (* penalty-rate penalty-blocks)) u10000))
-            )
-            (+ normal-interest penalty-interest)
+)
+
+(define-private (split-fee (gross-interest uint))
+    (let (
+            (fee-cut (/ (* gross-interest (var-get protocol-fee-bps)) u10000))
+            (lender-cut (- gross-interest fee-cut))
+        )
+        { protocol: fee-cut, lenders: lender-cut }
+    )
+)
+
+(define-private (shares-to-mint-for (amount uint))
+    (let (
+            (current-pool (var-get pool-total-assets))
+            (current-total-shares (var-get total-shares))
+        )
+        (if (is-eq current-total-shares u0)
+            amount
+            (/ (* amount current-total-shares) current-pool)
+        )
+    )
+)
+
+(define-private (shares-to-assets (shares uint))
+    (let (
+            (current-total-shares (var-get total-shares))
+            (current-pool (var-get pool-total-assets))
+        )
+        (if (is-eq current-total-shares u0)
+            u0
+            (/ (* shares current-pool) current-total-shares)
         )
     )
 )
@@ -111,7 +137,27 @@
     )
 )
 
-(define-read-only (get-health-factor (borrower principal))
+(define-read-only (get-treasury-balance)
+    (ok (var-get treasury-balance))
+)
+
+(define-read-only (get-protocol-fee-bps)
+    (ok (var-get protocol-fee-bps))
+)
+
+(define-read-only (get-treasury-principal)
+    (ok (var-get treasury-principal))
+)
+
+(define-read-only (get-contract-owner)
+    (ok (var-get contract-owner))
+)
+
+(define-read-only (get-pending-owner)
+    (ok (var-get pending-owner))
+)
+
+(define-public (lend (amount uint))
     (let (
             (loan (unwrap! (map-get? loans borrower) (err u0)))
             (collateral-val (get collateral loan))
@@ -189,11 +235,11 @@
             (principal-amt (get amount loan))
             (collateral-amt (get collateral loan))
             (start-h (get start-height loan))
-            (due-h (get due-block loan))
-            (normal-rate (get rate-at-borrow loan))
-            (penalty-rate (var-get penalty-rate-per-block))
-            (interest (calculate-interest principal-amt start-h due-h normal-rate penalty-rate burn-block-height))
-            (total-due (+ principal-amt interest))
+            (gross-interest (calculate-interest principal-amt (- burn-block-height start-h)))
+            (fee-split (split-fee gross-interest))
+            (protocol-cut (get protocol fee-split))
+            (lender-cut (get lenders fee-split))
+            (total-due (+ principal-amt gross-interest))
         )
         (asserts! (>= repay-amount total-due) ERR-INSUFFICIENT-FUNDS)
         (try! (stx-transfer? total-due tx-sender (as-contract tx-sender)))
@@ -201,7 +247,8 @@
         (var-set total-borrowed-assets
             (- (var-get total-borrowed-assets) principal-amt)
         )
-        (var-set pool-total-assets (+ (var-get pool-total-assets) interest))
+        (var-set pool-total-assets (+ (var-get pool-total-assets) lender-cut))
+        (var-set treasury-balance (+ (var-get treasury-balance) protocol-cut))
         (map-delete loans tx-sender)
         (ok total-due)
     )
@@ -213,11 +260,11 @@
             (principal-amt (get amount loan))
             (collateral-amt (get collateral loan))
             (start-h (get start-height loan))
-            (due-h (get due-block loan))
-            (normal-rate (get rate-at-borrow loan))
-            (penalty-rate (var-get penalty-rate-per-block))
-            (interest (calculate-interest principal-amt start-h due-h normal-rate penalty-rate burn-block-height))
-            (total-due (+ principal-amt interest))
+            (gross-interest (calculate-interest principal-amt (- burn-block-height start-h)))
+            (fee-split (split-fee gross-interest))
+            (protocol-cut (get protocol fee-split))
+            (lender-cut (get lenders fee-split))
+            (total-due (+ principal-amt gross-interest))
             (threshold-factor (var-get liquidation-threshold))
             (health-benchmark (/ (* collateral-amt threshold-factor) u100))
         )
@@ -227,7 +274,8 @@
         (var-set total-borrowed-assets
             (- (var-get total-borrowed-assets) principal-amt)
         )
-        (var-set pool-total-assets (+ (var-get pool-total-assets) interest))
+        (var-set pool-total-assets (+ (var-get pool-total-assets) lender-cut))
+        (var-set treasury-balance (+ (var-get treasury-balance) protocol-cut))
         (map-delete loans borrower)
         (ok collateral-amt)
     )
@@ -247,18 +295,34 @@
     )
     (let (
             (pre-bal (stx-get-balance (as-contract tx-sender)))
-            (fee (/ (* amount FLASH-LOAN-FEE-BPS) u10000))
-            (total-repayment (+ amount fee))
+            (gross-fee (/ (* amount FLASH-LOAN-FEE-BPS) u10000))
+            (fee-split (split-fee gross-fee))
+            (protocol-cut (get protocol fee-split))
+            (lender-cut (get lenders fee-split))
         )
         (asserts! (> amount u0) ERR-INVALID-AMOUNT)
         (asserts! (<= amount pre-bal) ERR-INSUFFICIENT-FUNDS)
         (try! (as-contract (stx-transfer? amount tx-sender (contract-of recipient))))
-        (try! (contract-call? recipient execute-operation amount fee))
-        (asserts! (>= (stx-get-balance (as-contract tx-sender)) (+ pre-bal fee))
+        (try! (contract-call? recipient execute-operation amount gross-fee))
+        (asserts! (>= (stx-get-balance (as-contract tx-sender)) (+ pre-bal gross-fee))
             ERR-INVALID-FLASH-LOAN
         )
-        (var-set pool-total-assets (+ (var-get pool-total-assets) fee))
+        (var-set pool-total-assets (+ (var-get pool-total-assets) lender-cut))
+        (var-set treasury-balance (+ (var-get treasury-balance) protocol-cut))
         (ok amount)
+    )
+)
+
+(define-public (claim-treasury)
+    (let (
+            (balance (var-get treasury-balance))
+            (recipient (var-get treasury-principal))
+        )
+        (asserts! (is-eq tx-sender recipient) ERR-NOT-AUTHORIZED)
+        (asserts! (> balance u0) ERR-NO-TREASURY-BALANCE)
+        (var-set treasury-balance u0)
+        (try! (as-contract (stx-transfer? balance tx-sender recipient)))
+        (ok balance)
     )
 )
 
@@ -297,7 +361,30 @@
     )
 )
 
-(define-data-var contract-owner-var principal tx-sender)
+(define-read-only (get-contract-owner)
+    (ok (var-get contract-owner))
+)
+
+(define-read-only (get-pending-owner)
+    (ok (var-get pending-owner))
+)
+
+(define-public (propose-owner (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set pending-owner (some new-owner))
+        (ok new-owner)
+    )
+)
+
+(define-public (accept-ownership)
+    (let ((nominee (unwrap! (var-get pending-owner) ERR-NO-PENDING-OWNER)))
+        (asserts! (is-eq tx-sender nominee) ERR-NOT-AUTHORIZED)
+        (var-set contract-owner nominee)
+        (var-set pending-owner none)
+        (ok nominee)
+    )
+)
 
 (define-public (set-interest-rate (new-rate uint))
     (begin
@@ -325,11 +412,49 @@
     )
 )
 
-(define-public (set-collateral-ratio (new-ratio uint))
+(define-public (set-protocol-fee-bps (new-fee-bps uint))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
-        (var-set collateral-ratio new-ratio)
-        (ok new-ratio)
+        (asserts! (<= new-fee-bps MAX-PROTOCOL-FEE-BPS) ERR-INVALID-AMOUNT)
+        (var-set protocol-fee-bps new-fee-bps)
+        (ok new-fee-bps)
+    )
+)
+
+(define-public (set-treasury-principal (new-treasury principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set treasury-principal new-treasury)
+        (ok new-treasury)
+    )
+)
+
+(define-public (propose-owner (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (var-set pending-owner (some new-owner))
+        (ok new-owner)
+    )
+)
+
+(define-public (accept-ownership)
+    (let (
+            (nominee (unwrap! (var-get pending-owner) ERR-NO-PENDING-OWNER))
+        )
+        (asserts! (is-eq tx-sender nominee) ERR-NOT-AUTHORIZED)
+        (var-set contract-owner nominee)
+        (var-set pending-owner none)
+        (ok nominee)
+    )
+)
+
+(define-read-only (get-current-interest-accrued (borrower principal))
+    (let (
+            (loan (unwrap! (map-get? loans borrower) (err u0)))
+            (amt (get amount loan))
+            (start (get start-height loan))
+        )
+        (ok (calculate-interest amt (- burn-block-height start)))
     )
 )
 

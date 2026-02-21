@@ -1,46 +1,74 @@
 warning: use of potentially unchecked data
---> contracts\p2p-lending.clar:239:36
+--> contracts\p2p-lending.clar:212:43
+        (try! (as-contract (stx-transfer? collateral-amt tx-sender tx-sender)))
+                                          ^~~~~~~~~~~~~~
+note:: source of untrusted input here
+(define-public (liquidate (borrower principal))
+                           ^~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:214:13
+            (- (var-get total-borrowed-assets) principal-amt)
+            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+note:: source of untrusted input here
+(define-public (liquidate (borrower principal))
+                           ^~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:217:27
+        (map-delete loans borrower)
+                          ^~~~~~~~
+note:: source of untrusted input here
+(define-public (liquidate (borrower principal))
+                           ^~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:225:36
         (var-set pool-total-assets (+ (var-get pool-total-assets) amount))
                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 note:: source of untrusted input here
 (define-public (add-liquidity-rewards (amount uint))
                                        ^~~~~~
 warning: use of potentially unchecked data
---> contracts\p2p-lending.clar:255:60
+--> contracts\p2p-lending.clar:241:60
         (try! (as-contract (stx-transfer? amount tx-sender (contract-of recipient))))
                                                            ^~~~~~~~~~~~~~~~~~~~~~~
 note:: source of untrusted input here
         (recipient <flash-loan-receiver>)
          ^~~~~~~~~
 warning: use of potentially unchecked data
---> contracts\p2p-lending.clar:256:31
+--> contracts\p2p-lending.clar:242:31
         (try! (contract-call? recipient execute-operation amount fee))
                               ^~~~~~~~~
 note:: source of untrusted input here
         (recipient <flash-loan-receiver>)
          ^~~~~~~~~
 warning: use of potentially unchecked data
---> contracts\p2p-lending.clar:305:42
+--> contracts\p2p-lending.clar:294:32
+        (var-set pending-owner (some new-owner))
+                               ^~~~~~~~~~~~~~~~
+note:: source of untrusted input here
+(define-public (propose-owner (new-owner principal))
+                               ^~~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:311:42
         (var-set interest-rate-per-block new-rate)
                                          ^~~~~~~~
 note:: source of untrusted input here
 (define-public (set-interest-rate (new-rate uint))
                                    ^~~~~~~~
 warning: use of potentially unchecked data
---> contracts\p2p-lending.clar:331:35
+--> contracts\p2p-lending.clar:319:35
         (var-set collateral-ratio new-ratio)
                                   ^~~~~~~~~
 note:: source of untrusted input here
 (define-public (set-collateral-ratio (new-ratio uint))
                                       ^~~~~~~~~
 warning: use of potentially unchecked data
---> contracts\p2p-lending.clar:339:40
+--> contracts\p2p-lending.clar:327:40
         (var-set liquidation-threshold new-threshold)
                                        ^~~~~~~~~~~~~
 note:: source of untrusted input here
 (define-public (set-liquidation-threshold (new-threshold uint))
                                            ^~~~~~~~~~~~~
-! 6 warnings detected
+! 10 warnings detected
 ??? 1 contract checked
 
 ----------------------------
