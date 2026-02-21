@@ -1,0 +1,64 @@
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:215:27
+        (map-delete loans borrower)
+                          ^~~~~~~~
+note:: source of untrusted input here
+(define-public (liquidate (borrower principal))
+                           ^~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:223:36
+        (var-set pool-total-assets (+ (var-get pool-total-assets) amount))
+                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+note:: source of untrusted input here
+(define-public (add-liquidity-rewards (amount uint))
+                                       ^~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:239:60
+        (try! (as-contract (stx-transfer? amount tx-sender (contract-of recipient))))
+                                                           ^~~~~~~~~~~~~~~~~~~~~~~
+note:: source of untrusted input here
+        (recipient <flash-loan-receiver>)
+         ^~~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:240:31
+        (try! (contract-call? recipient execute-operation amount fee))
+                              ^~~~~~~~~
+note:: source of untrusted input here
+        (recipient <flash-loan-receiver>)
+         ^~~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:284:42
+        (var-set interest-rate-per-block new-rate)
+                                         ^~~~~~~~
+note:: source of untrusted input here
+(define-public (set-interest-rate (new-rate uint))
+                                   ^~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:292:35
+        (var-set collateral-ratio new-ratio)
+                                  ^~~~~~~~~
+note:: source of untrusted input here
+(define-public (set-collateral-ratio (new-ratio uint))
+                                      ^~~~~~~~~
+warning: use of potentially unchecked data
+--> contracts\p2p-lending.clar:300:40
+        (var-set liquidation-threshold new-threshold)
+                                       ^~~~~~~~~~~~~
+note:: source of untrusted input here
+(define-public (set-liquidation-threshold (new-threshold uint))
+                                           ^~~~~~~~~~~~~
+! 7 warnings detected
+??? 1 contract checked
+
+----------------------------
+Hint: what's next?
+Once you are ready to write TypeScript unit tests for your contract, run the following command:
+
+  $ npm install
+  $ npm test
+    Run all run tests in the ./tests folder.
+
+Find more information on testing with Clarinet here: https://docs.hiro.so/stacks/clarinet-js-sdk
+These hints can be disabled in the ~/.clarinet/clarinetrc.toml file.
+  $ mkdir -p ~/.clarinet; echo "enable_hints = false" >> ~/.clarinet/clarinetrc.toml
+----------------------------
